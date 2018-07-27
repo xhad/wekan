@@ -1,0 +1,180 @@
+name: wekan
+version: 0
+version-script: git describe --dirty --tags |  cut -c 2-
+summary: The open-source Trello-like kanban
+description: |
+   Wekan is an open-source and collaborative kanban board application.
+
+   Whether you’re maintaining a personal todo list, planning your holidays with some friends, or working in a team on your next revolutionary idea, Kanban boards are an unbeatable tool to keep your things organized. They give you a visual overview of the current state of your project, and make you productive by allowing you to focus on the few items that matter the most.
+   Depending on target environment, some configuration settings might need to be adjusted.
+   For full list of configuration options call:
+   $ wekan.help
+
+confinement: strict
+grade: stable
+
+architectures:
+  - amd64
+
+plugs:
+  mongodb-plug:
+    interface: content
+    target: $SNAP_DATA/shared
+
+hooks:
+  configure:
+    plugs:
+      - network
+      - network-bind
+
+slots:
+  mongodb-slot:
+    interface: content
+    write:
+      - $SNAP_DATA/share
+
+apps:
+    wekan:
+        command: wekan-control
+        daemon: simple
+        plugs: [network, network-bind]
+
+    mongodb:
+        command: mongodb-control
+        daemon: simple
+        plugs: [network, network-bind]
+
+    caddy:
+        command: caddy-control
+        daemon: simple
+        plugs: [network, network-bind]
+
+    help:
+        command: wekan-help
+
+    database-backup:
+        command: mongodb-backup
+        plugs: [network, network-bind]
+
+    database-list-backups:
+        command: ls -ald $SNAP_COMMON/db-backups/*
+
+    database-restore:
+        command: mongodb-restore
+        plugs: [network, network-bind]
+
+parts:
+    mongodb:
+        source: https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu1604-3.2.20.tgz
+        plugin: dump
+        stage-packages: [libssl1.0.0]
+        filesets:
+            mongo:
+                - usr
+                - bin
+                - lib
+        stage:
+            - $mongo
+        prime:
+            - $mongo
+
+    wekan:
+        source: .
+        plugin: nodejs
+        node-engine: 8.11.3
+        node-packages:
+            - npm
+            - node-gyp
+            - node-pre-gyp
+            - fibers@2.0.0
+        build-packages:
+            - ca-certificates
+            - apt-utils
+            - python
+            - g++
+            - capnproto
+            - npm
+            - curl
+            - execstack
+        stage-packages:
+            - libfontconfig1
+        override-build: |
+            echo "Cleaning environment first"
+            rm -rf ~/.meteor ~/.npm /usr/local/lib/node_modules
+            # Node Fibers 100% CPU usage issue:
+            # https://github.com/wekan/wekan-mongodb/issues/2#issuecomment-381453161
+            # https://github.com/meteor/meteor/issues/9796#issuecomment-381676326
+            # https://github.com/sandstorm-io/sandstorm/blob/0f1fec013fe7208ed0fd97eb88b31b77e3c61f42/shell/server/00-startup.js#L99-L129
+            # Also see beginning of wekan/server/authentication.js
+            #   import Fiber from "fibers";
+            #   Fiber.poolSize = 1e9;
+            # Download node version 8.11.3 that has fix included, node binary copied from Sandstorm
+            # Description at https://releases.wekan.team/node.txt
+            echo "5263dc1c571885921179b11a1c6eb9ca82a95a89b69c15b366f885e9b5a32d66  node" >> node-SHASUMS256.txt.asc
+            curl https://releases.wekan.team/node -o node
+            # Verify Fibers patched node authenticity
+            echo "Fibers 100% CPU issue patched node authenticity:"
+            grep node node-SHASUMS256.txt.asc | shasum -a 256 -c -
+            rm -f node-SHASUMS256.txt.asc
+            chmod +x node
+            mv node `which node`
+            # DOES NOT WORK: paxctl fix.
+            # Removed from build-packages: - paxctl
+            #echo "Applying paxctl fix for alpine linux: https://github.com/wekan/wekan/issues/1303"
+            #paxctl -mC `which node`
+            echo "Installing meteor"
+            curl https://install.meteor.com/ -o install_meteor.sh
+            sed -i "s|RELEASE=.*|RELEASE=\"1.6.0.1\"|g" install_meteor.sh
+            chmod +x install_meteor.sh
+            sh install_meteor.sh
+            rm install_meteor.sh
+            mkdir packages
+            cd packages
+            git clone --depth 1 -b master https://github.com/wekan/flow-router.git kadira-flow-router
+            git clone --depth 1 -b master https://github.com/meteor-useraccounts/core.git meteor-useraccounts-core
+            sed -i 's/api\.versionsFrom/\/\/api.versionsFrom/' meteor-useraccounts-core/package.js
+            cd ..
+            rm -rf package-lock.json .build
+            meteor add standard-minifier-js --allow-superuser
+            meteor npm install --allow-superuser
+            meteor build .build --directory --allow-superuser
+            cp -f fix-download-unicode/cfs_access-point.txt .build/bundle/programs/server/packages/cfs_access-point.js
+            #Removed binary version of bcrypt because of security vulnerability that is not fixed yet.
+            #https://github.com/wekan/wekan/commit/4b2010213907c61b0e0482ab55abb06f6a668eac
+            #https://github.com/wekan/wekan/commit/7eeabf14be3c63fae2226e561ef8a0c1390c8d3c
+            #cd .build/bundle/programs/server/npm/node_modules/meteor/npm-bcrypt
+            #rm -rf node_modules/bcrypt
+            #meteor npm install --save bcrypt
+            # Change from npm-bcrypt directory back to .build/bundle/programs/server directory.
+            #cd ../../../../
+            # Change to directory .build/bundle/programs/server
+            cd .build/bundle/programs/server
+            npm install
+            #meteor npm install --save bcrypt
+            # Change back to Wekan source directory
+            cd ../../../..
+            cp -r .build/bundle/* $SNAPCRAFT_PART_INSTALL/
+            cp .build/bundle/.node_version.txt $SNAPCRAFT_PART_INSTALL/
+            rm $SNAPCRAFT_PART_INSTALL/lib/node_modules/wekan
+            execstack --clear-execstack $SNAPCRAFT_PART_INSTALL/programs/server/npm/node_modules/meteor/rajit_bootstrap3-datepicker/lib/bootstrap-datepicker/node_modules/phantomjs-prebuilt/lib/phantom/bin/phantomjs
+        organize:
+            README: README.wekan
+        prime:
+            - -lib/node_modules/node-pre-gyp/node_modules/tar/lib/.unpack.js.swp
+
+    helpers:
+        source: snap-src
+        plugin: dump
+
+    caddy:
+        plugin: dump
+        source: https://caddyserver.com/download/linux/amd64?license=personal
+        source-type: tar
+        organize:
+          caddy: bin/caddy
+          CHANGES.txt: CADDY_CHANGES.txt
+          EULA.txt: CADDY_EULA.txt
+          LICENSES.txt: CADDY_LICENSES.txt
+          README.txt: CADDY_README.txt
+        stage:
+          - -init
